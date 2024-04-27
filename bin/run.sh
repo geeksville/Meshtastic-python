@@ -1,2 +1,3 @@
 rm log_*
-PYTHONPATH=. python3 -m meshtastic "$@"
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+PYTHONPATH=$SCRIPT_DIR/.. python3 -m meshtastic "$@"
