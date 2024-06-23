@@ -22,6 +22,7 @@ pyyaml = "^6.0.1"
 pypubsub = "^4.0.3"
 bleak = "^0.21.1"
 packaging = "^24.0"
+simplepyble = "^0.7.3"
 
 [tool.poetry.group.dev.dependencies]
 hypothesis = "^6.103.2"

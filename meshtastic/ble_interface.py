@@ -6,8 +6,7 @@ import struct
 import asyncio
 from threading import Thread, Event
 from typing import Optional
-
-from bleak import BleakScanner, BleakClient, BLEDevice
+import simplepyble
 
 from meshtastic.mesh_interface import MeshInterface
 from meshtastic.util import our_exit
@@ -16,6 +15,31 @@ SERVICE_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
 TORADIO_UUID = "f75c76d2-129e-4dad-a1dd-7866124401e7"
 FROMRADIO_UUID = "2c55e69e-4993-11ed-b878-0242ac120002"
 FROMNUM_UUID = "ed9da18c-a800-4f66-a670-aa7547e34453"
+
+
+def _simplepy_discover(uuid: str):
+    """Find all BLE peripherals with a specific service UUID."""
+    adapters = simplepyble.Adapter.get_adapters()
+
+    if len(adapters) == 0:
+        raise BLEInterface.BLEError("No adapters found")
+
+    for adapter in adapters:
+        logging.debug(f"BLE adapter {adapter.identifier()} [{adapter.address()}]")
+
+        adapter.set_callback_on_scan_start(lambda: logging.debug("Scan started."))
+        adapter.set_callback_on_scan_stop(lambda: logging.debug("Scan complete."))
+        adapter.set_callback_on_scan_found(lambda peripheral: logging.debug(f"Found {peripheral.identifier()} [{peripheral.address()}]"))
+
+        # Scan for 5 seconds
+        adapter.scan_for(5000)
+        peripherals = adapter.scan_get_results()
+
+        # Filter out peripherals that don't have the service we're looking for
+        peripherals = list(filter(lambda p: uuid in map(lambda serv: serv.uuid(), p.services()), peripherals))
+        return peripherals
+
+    raise BLEInterface.BLEError("No suitable BLE peripherals found.")
 
 
 class BLEInterface(MeshInterface):
@@ -36,6 +60,7 @@ class BLEInterface(MeshInterface):
         self.state = BLEInterface.BLEState()
 
         self.should_read = False
+        self.peripheral = None
 
         logging.debug("Threads starting")
         self._receiveThread = Thread(target = self._receiveFromRadioImpl)
@@ -48,12 +73,12 @@ class BLEInterface(MeshInterface):
 
         try:
             logging.debug(f"BLE connecting to: {address}")
-            self.client = self.connect(address)
+            self.connect(address)
             self.state.BLE = True
             logging.debug("BLE connected")
-        except BLEInterface.BLEError as e:
+        except Exception as e:
             self.close()
-            raise e
+            raise BLEInterface.BLEError(f"Failed to connect to BLE device: {e}") from e
 
         logging.debug("Mesh init starting")
         MeshInterface.__init__(self, debugOut = debugOut, noProto = noProto, noNodes = noNodes)
@@ -74,29 +99,18 @@ class BLEInterface(MeshInterface):
         self.should_read = True
 
 
-    def scan(self) -> list[BLEDevice]:
+    def scan(self) -> list:
         """Scan for available BLE devices."""
-        with BLEClient() as client:
-            response = client.discover(
-                    return_adv = True,
-                    service_uuids=[SERVICE_UUID]
-                )
-
-            devices = response.values()
-
-            # bleak sometimes returns devices we didn't ask for, so filter the response
-            # to only return true meshtastic devices
-            # d[0] is the device. d[1] is the advertisement data
-            devices = list(filter(lambda d: SERVICE_UUID in d[1].service_uuids, devices))
-            return list(map(lambda d: d[0], devices))
+        response = _simplepy_discover(SERVICE_UUID)
+        return response
 
 
-    def find_device(self, address: Optional[str]) -> BLEDevice:
+    def find_device(self, address: Optional[str]):
         """Find a device by address"""
         addressed_devices = self.scan()
 
         if address:
-            addressed_devices = list(filter(lambda x: address == x.name or address == x.address, addressed_devices))
+            addressed_devices = list(filter(lambda x: address == x.identifier() or address == x.address(), addressed_devices))
 
         if len(addressed_devices) == 0:
             raise BLEInterface.BLEError(f"No Meshtastic BLE peripheral with identifier or address '{address}' found. Try --ble-scan to find it.")
@@ -116,10 +130,11 @@ class BLEInterface(MeshInterface):
         "Connect to a device by address"
 
         # Bleak docs recommend always doing a scan before connecting (even if we know addr)
-        device = self.find_device(address)
-        client = BLEClient(device.address)
-        client.connect()
-        return client
+        self.peripheral = peripheral = self.find_device(address)
+        if not peripheral.is_connected():
+            peripheral.connect()
+        # client = BLEClient(peripheral)
+        # return client
 
 
     def _receiveFromRadioImpl(self):
@@ -129,7 +144,7 @@ class BLEInterface(MeshInterface):
                 self.should_read = False
                 retries = 0
                 while True:
-                    b = bytes(self.client.read_gatt_char(FROMRADIO_UUID))
+                    b = bytes(self.peripheral.read(SERVICE_UUID, FROMRADIO_UUID))
                     if not b:
                         if retries < 5:
                             time.sleep(0.1)
@@ -146,13 +161,18 @@ class BLEInterface(MeshInterface):
         b = toRadio.SerializeToString()
         if b:
             logging.debug(f"TORADIO write: {b.hex()}")
-            self.client.write_gatt_char(TORADIO_UUID, b, response = True)
+
+            # `write_request` is for unacknowledged writes.
+            # `write_command` is for acknowledged writes.
+            self.peripheral.write_command(SERVICE_UUID, TORADIO_UUID, b)
             # Allow to propagate and then make sure we read
             time.sleep(0.1)
             self.should_read = True
 
 
     def close(self):
+        """Close the BLE connection and stop the receive thread."""
+
         if self.state.MESH:
             MeshInterface.close(self)
 
@@ -160,29 +180,19 @@ class BLEInterface(MeshInterface):
             self._receiveThread_started.clear()
             self._receiveThread_stopped.wait(5)
 
-        if self.state.BLE:
-            self.client.disconnect()
-            self.client.close()
+        if self.peripheral and self.peripheral.is_connected():
+            self.peripheral.disconnect()
 
 
 class BLEClient():
     """Client for managing connection to a BLE device"""
-    def __init__(self, address = None, **kwargs):
+    def __init__(self, peripheral, **kwargs):
         self._eventThread = Thread(target = self._run_event_loop)
         self._eventThread_started = Event()
         self._eventThread_stopped = Event()
         self._eventThread.start()
         self._eventThread_started.wait(1)
-
-        if not address:
-            logging.debug("No address provided - only discover method will work.")
-            return
-
-        self.bleak_client = BleakClient(address, **kwargs)
-
-
-    def discover(self, **kwargs): # pylint: disable=C0116
-        return self.async_await(BleakScanner.discover(**kwargs))
+        self.peripheral = peripheral
 
     def pair(self, **kwargs): # pylint: disable=C0116
         return self.async_await(self.bleak_client.pair(**kwargs))
