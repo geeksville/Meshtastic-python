@@ -763,6 +763,17 @@ dev = ["pre-commit", "tox"]
 testing = ["pytest", "pytest-benchmark"]
 
 [[package]]
+name = "print-color"
+version = "0.4.6"
+description = "A simple package to print in color to the terminal"
+optional = false
+python-versions = ">=3.7,<4.0"
+files = [
+    {file = "print_color-0.4.6-py3-none-any.whl", hash = "sha256:494bd1cdb84daf481f0e63bd22b3c32f7d52827d8f5d9138a96bb01ca8ba9299"},
+    {file = "print_color-0.4.6.tar.gz", hash = "sha256:d3aafc1666c8d31a85fffa6ee8e4f269f5d5e338d685b4e6179915c71867c585"},
+]
+
+[[package]]
 name = "protobuf"
 version = "5.27.1"
 description = ""
@@ -1250,16 +1261,6 @@ files = [
 widechars = ["wcwidth"]
 
 [[package]]
-name = "timeago"
-version = "1.0.16"
-description = "A very simple python library, used to format datetime with `*** time ago` statement. eg: \"3 hours ago\"."
-optional = false
-python-versions = "*"
-files = [
-    {file = "timeago-1.0.16-py3-none-any.whl", hash = "sha256:9b8cb2e3102b329f35a04aa4531982d867b093b19481cfbb1dac7845fa2f79b0"},
-]
-
-[[package]]
 name = "tomli"
 version = "2.0.1"
 description = "A lil' TOML parser"
@@ -1617,4 +1618,4 @@ tunnel = []
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.8,<3.13"
-content-hash = "5db67ca36c9c64ed4f4ec9bfc7978afb8eb1ba97beb36bf66163dbe88edcbe70"
+content-hash = "03d35aec61af2b410fe1db4b26ec7ea1fb91041698aba36e9958afc87298f28e"
