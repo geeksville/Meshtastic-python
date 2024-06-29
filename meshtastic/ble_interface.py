@@ -1,6 +1,5 @@
-"""Bluetooth interface
+"""Bluetooth interface.
 """
-import asyncio
 import logging
 import struct
 import time
@@ -34,8 +33,8 @@ def _simplepy_discover(uuid: str):
         adapter.set_callback_on_scan_stop(lambda: logging.debug("Scan complete."))
         adapter.set_callback_on_scan_found(lambda peripheral: logging.debug(f"Found {peripheral.identifier()} [{peripheral.address()}]"))
 
-        # Scan for 5 seconds
-        adapter.scan_for(5000)
+        # Scan for 10 seconds
+        adapter.scan_for(10000)
         peripherals = adapter.scan_get_results()
 
         # Filter out peripherals that don't have the service we're looking for
@@ -52,11 +51,6 @@ class BLEInterface(MeshInterface):
         """An exception class for BLE errors."""
         pass
 
-    class BLEState:  # pylint: disable=C0115
-        THREADS = False
-        BLE = False
-        MESH = False
-
     def __init__(
         self,
         address: Optional[str],
@@ -64,10 +58,13 @@ class BLEInterface(MeshInterface):
         debugOut=None,
         noNodes: bool = False,
     ):
-        self.state = BLEInterface.BLEState()
-
         self.should_read = False
         self.peripheral = None
+
+        logging.debug("Mesh init starting")
+        MeshInterface.__init__(
+            self, debugOut=debugOut, noProto=noProto, noNodes=noNodes
+        )
 
         logging.debug("Threads starting")
         self._receiveThread = Thread(target=self._receiveFromRadioImpl)
@@ -75,39 +72,34 @@ class BLEInterface(MeshInterface):
         self._receiveThread_stopped = Event()
         self._receiveThread.start()
         self._receiveThread_started.wait(1)
-        self.state.THREADS = True
         logging.debug("Threads running")
 
         try:
             logging.debug(f"BLE connecting to: {address if address else 'any'}")
-            self.client = self.connect(address)
-            self.state.BLE = True
+            self.connect(address)
             logging.debug("BLE connected")
+
+            # self.peripheral.notify(SERVICE_UUID, FROMNUM_UUID, lambda data: self.from_num_handler(data))
+            # self.peripheral.notify(SERVICE_UUID, LOGRADIO_UUID, lambda data: self.log_radio_handler)
+            logging.debug("Registered for BLE notifies")
         except Exception as e:
             self.close()
-            raise BLEInterface.BLEError(f"Failed to connect to BLE device: {e}") from e
+            raise BLEInterface.BLEError(f"Failed to connect to BLE device") from e
 
-        logging.debug("Mesh init starting")
-        MeshInterface.__init__(
-            self, debugOut=debugOut, noProto=noProto, noNodes=noNodes
-        )
         self._startConfig()
         if not self.noProto:
             self._waitConnected(timeout=60.0)
             self.waitForConfig()
-        self.state.MESH = True
         logging.debug("Mesh init finished")
 
-        logging.debug("Register FROMNUM notify callback")
-        self.client.start_notify(FROMNUM_UUID, self.from_num_handler)
-        self.client.start_notify(LOGRADIO_UUID, self.log_radio_handler)
 
-    async def from_num_handler(self, _, b):  # pylint: disable=C0116
+
+    def from_num_handler(self, b):  # pylint: disable=C0116
         from_num = struct.unpack("<I", bytes(b))[0]
         logging.debug(f"FROMNUM notify: {from_num}")
         self.should_read = True
 
-    async def log_radio_handler(self, _, b): # pylint: disable=C0116
+    def log_radio_handler(self, b): # pylint: disable=C0116
         log_radio = b.decode('utf-8').replace('\n', '')
         if log_radio.startswith("DEBUG"):
             print(log_radio, color="cyan", end=None)
@@ -148,13 +140,21 @@ class BLEInterface(MeshInterface):
         "Standardize BLE address by removing extraneous characters and lowercasing."
         return address.replace("-", "").replace("_", "").replace(":", "").lower()
 
-    def connect(self, address: Optional[str] = None):
+    def connect(self, address: Optional[str] = None) -> None:
         "Connect to a device by address."
 
         # Bleak docs recommend always doing a scan before connecting (even if we know addr)
         self.peripheral = peripheral = self.find_device(address)
         if not peripheral.is_connected():
             peripheral.connect()
+
+            logging.debug("Successfully connected, listing services...")
+            self.services = peripheral.services()
+            for s in self.services:
+                logging.debug(f"Service: {s.uuid()}")
+                for c in s.characteristics():
+                    logging.debug(f"  Characteristic: {c.uuid()}")
+
         # client = BLEClient(peripheral)
         # return client
 
@@ -178,7 +178,7 @@ class BLEInterface(MeshInterface):
                     logging.debug(f"FROMRADIO read: {b.hex()}")
                     self._handleFromRadio(b)
             else:
-                time.sleep(0.1)
+                time.sleep(0.01)
         self._receiveThread_stopped.set()
 
     def _sendToRadioImpl(self, toRadio):
@@ -190,76 +190,19 @@ class BLEInterface(MeshInterface):
             except Exception as e:
                 raise BLEInterface.BLEError("Error writing BLE") from e
             # Allow to propagate and then make sure we read
-            time.sleep(0.1)
+            time.sleep(0.01)
             self.should_read = True
 
     def close(self):
         """Close the BLE connection and stop the receive thread."""
 
-        if self.state.MESH:
-            MeshInterface.close(self)
+        MeshInterface.close(self)
 
-        if self.state.THREADS:
+        if self._receiveThread:
             self._receiveThread_started.clear()
             self._receiveThread_stopped.wait(5)
+            self._receiveThread = None
 
         if self.peripheral and self.peripheral.is_connected():
             self.peripheral.disconnect()
-
-
-class BLEClient:
-    """Client for managing connection to a BLE device"""
-    def __init__(self, peripheral, **kwargs):
-        self._eventThread = Thread(target = self._run_event_loop, name="BLEClient")
-        self._eventThread_started = Event()
-        self._eventThread_stopped = Event()
-        self._eventThread.start()
-        self._eventThread_started.wait(1)
-        self.peripheral = peripheral
-
-    def pair(self, **kwargs):  # pylint: disable=C0116
-        return self.async_await(self.bleak_client.pair(**kwargs))
-
-    def connect(self, **kwargs):  # pylint: disable=C0116
-        return self.async_await(self.bleak_client.connect(**kwargs))
-
-    def disconnect(self, **kwargs):  # pylint: disable=C0116
-        self.async_await(self.bleak_client.disconnect(**kwargs))
-
-    def read_gatt_char(self, *args, **kwargs):  # pylint: disable=C0116
-        return self.async_await(self.bleak_client.read_gatt_char(*args, **kwargs))
-
-    def write_gatt_char(self, *args, **kwargs):  # pylint: disable=C0116
-        self.async_await(self.bleak_client.write_gatt_char(*args, **kwargs))
-
-    def start_notify(self, *args, **kwargs):  # pylint: disable=C0116
-        self.async_await(self.bleak_client.start_notify(*args, **kwargs))
-
-    def close(self):  # pylint: disable=C0116
-        self.async_run(self._stop_event_loop())
-        self._eventThread_stopped.wait(5)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _type, _value, _traceback):
-        self.close()
-
-    def async_await(self, coro, timeout=None):  # pylint: disable=C0116
-        return self.async_run(coro).result(timeout)
-
-    def async_run(self, coro):  # pylint: disable=C0116
-        return asyncio.run_coroutine_threadsafe(coro, self._eventLoop)
-
-    def _run_event_loop(self):
-        # I don't know if the event loop can be initialized in __init__ so silencing pylint
-        self._eventLoop = asyncio.new_event_loop()  # pylint: disable=W0201
-        self._eventThread_started.set()
-        try:
-            self._eventLoop.run_forever()
-        finally:
-            self._eventLoop.close()
-        self._eventThread_stopped.set()
-
-    async def _stop_event_loop(self):
-        self._eventLoop.stop()
+            self.peripheral = None
